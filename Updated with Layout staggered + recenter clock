@@ -1,0 +1,161 @@
+import tkinter as tk
+from PIL import Image, ImageDraw, ImageFont, ImageTk
+import time
+import math
+import requests
+import datetime
+import pytz
+
+# ================= CONFIG =================
+WIDTH, HEIGHT = 800, 480
+TIMEZONE = pytz.timezone("America/Denver")
+LOCATION = "Littleton,US"
+API_KEY = "25e8a482b383f7c1611f9f6706ac1c57"
+
+REFRESH_INTERVAL = 600  # 10 minutes
+FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
+# ================= CLOCK =================
+def hand(cx, cy, length, angle_deg):
+    angle = math.radians(angle_deg)
+    x = cx + length * math.sin(angle)
+    y = cy - length * math.cos(angle)
+    return (cx, cy, x, y)
+
+def draw_clock(draw, now):
+    cx, cy = 150, 250  # lowered clock position
+    r = 100
+    draw.ellipse((cx - r, cy - r, cx + r, cy + r), outline="gray", width=2)
+
+    hour = now.hour % 12
+    minute = now.minute
+    second = now.second
+
+    draw.line(hand(cx, cy, r * 0.5, hour * 30 + minute / 2), fill="white", width=5)
+    draw.line(hand(cx, cy, r * 0.75, minute * 6), fill="white", width=3)
+    draw.line(hand(cx, cy, r * 0.85, second * 6), fill="white", width=1)
+
+# ================= WEATHER =================
+weather_data = None
+last_weather_update = 0
+
+def get_weather():
+    global weather_data, last_weather_update
+    try:
+        url = f"http://api.openweathermap.org/data/2.5/forecast?q={LOCATION}&appid={API_KEY}&units=imperial"
+        res = requests.get(url).json()
+
+        now_weather = {
+            "temp": res["list"][0]["main"]["temp"],
+            "desc": res["list"][0]["weather"][0]["description"].title(),
+            "hum": res["list"][0]["main"]["humidity"],
+            "wind": res["list"][0]["wind"]["speed"]
+        }
+
+        # --- improved next 2-day forecast ---
+        days = {}
+        for item in res["list"]:
+            dt = datetime.datetime.fromtimestamp(item["dt"])
+            if dt.date() == datetime.datetime.now().date():
+                continue
+            day_name = dt.strftime("%a")
+            if day_name not in days:
+                days[day_name] = {"high": item["main"]["temp_max"], "low": item["main"]["temp_min"]}
+            else:
+                days[day_name]["high"] = max(days[day_name]["high"], item["main"]["temp_max"])
+                days[day_name]["low"] = min(days[day_name]["low"], item["main"]["temp_min"])
+            if len(days) >= 2:
+                break
+
+        forecast = []
+        for d, v in list(days.items())[:2]:
+            forecast.append({"day": d, "high": round(v["high"]), "low": round(v["low"])})
+
+        weather_data = {"now": now_weather, "forecast": forecast}
+        last_weather_update = time.time()
+
+    except Exception as e:
+        weather_data = {"error": str(e)}
+
+# ================= DISPLAY =================
+def draw_display():
+    global last_weather_update
+    img = Image.new("RGB", (WIDTH, HEIGHT), "black")
+    draw = ImageDraw.Draw(img)
+    font_large = ImageFont.truetype(FONT_PATH, 50)
+    font_med = ImageFont.truetype(FONT_PATH, 28)
+    font_small = ImageFont.truetype(FONT_PATH, 22)
+
+    now = datetime.datetime.now(TIMEZONE)
+    draw_clock(draw, now)
+
+    # stagger layout positions
+    x_main = 300
+    x_offset = 380
+    y_start = 60
+
+    time_str = now.strftime("%-I:%M:%S %p")
+    date_str = now.strftime("%a, %b %d")
+    draw.text((x_main, y_start), time_str, font=font_large, fill="gray")
+    draw.text((x_offset, y_start + 60), date_str, font=font_med, fill="gray")
+
+    # Refresh weather if needed
+    if time.time() - last_weather_update > REFRESH_INTERVAL or (weather_data is None):
+        get_weather()
+
+    y_offset = 180
+    if weather_data is None:
+        draw.text((x_main, y_offset), "Loading weather...", font=font_med, fill="gray")
+    elif "error" in weather_data:
+        draw.text((x_main, y_offset), "No Internet – Retrying...", font=font_med, fill="gray")
+    else:
+        w = weather_data["now"]
+        draw.text((x_offset, y_offset), f"{round(w['temp'])}°F — {w['desc']}", font=font_med, fill="gray")
+        draw.text((x_main, y_offset + 35),
+                  f"Humidity: {w['hum']}%   Wind: {round(w['wind'])} mph",
+                  font=font_small, fill="gray")
+
+        # Clothing suggestion
+        if w['temp'] < 35:
+            outfit = "Jacket weather"
+        elif 35 <= w['temp'] < 65:
+            outfit = "Sweatshirt weather"
+        else:
+            outfit = "T-shirt weather"
+        draw.text((x_offset, y_offset + 65), outfit, font=font_small, fill="gray")
+
+        # Forecast (bottom-right, staggered)
+        yb = HEIGHT - 200
+        x_start = x_main
+        for f in weather_data["forecast"]:
+            block = f"{f['day']}: {f['high']}° / {f['low']}°"
+            draw.text((x_start, yb), block, font=font_small, fill="gray")
+            x_start = x_offset if x_start == x_main else x_main  # alternate staggering
+            yb += 28
+
+        # Last updated line below forecast
+        updated_time = datetime.datetime.now(TIMEZONE).strftime("%I:%M %p")
+        draw.text((x_main, yb + 10), f"Weather updated: {updated_time}", font=font_small, fill="gray")
+
+    # render
+    tk_img = ImageTk.PhotoImage(img)
+    canvas.create_image(0, 0, anchor="nw", image=tk_img)
+    canvas.image = tk_img
+    root.after(1000, draw_display)
+
+# ================= TKINTER =================
+root = tk.Tk()
+root.title("Mirror Dashboard")
+root.attributes("-fullscreen", True)
+canvas = tk.Canvas(root, width=WIDTH, height=HEIGHT, bg="black", highlightthickness=0)
+canvas.pack()
+
+def exit_fullscreen(event=None):
+    root.attributes("-fullscreen", False)
+    root.destroy()
+
+root.bind("<Escape>", exit_fullscreen)
+
+get_weather()
+draw_display()
+root.mainloop()
